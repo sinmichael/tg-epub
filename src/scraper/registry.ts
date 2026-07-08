@@ -115,7 +115,11 @@ export async function searchAll(
 
   logger.info({ query, sources: nameList, rawCount: books.length, finalCount: deduplicated.length }, 'Search complete');
 
-  setCachedSearch(query, deduplicated);
+  if (deduplicated.length > 0) {
+    setCachedSearch(query, deduplicated);
+  } else {
+    logger.debug({ query }, 'Skipping cache for empty results');
+  }
 
   return deduplicated;
 }
