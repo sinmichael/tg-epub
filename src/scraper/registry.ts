@@ -1,16 +1,19 @@
 import type { BookResult, Source } from './types.js';
 import { GutenbergSource } from './sources/gutenberg.js';
 import { LibgenSource } from './sources/libgen.js';
+import { AnnaArchiveSource } from './sources/anna.js';
 import { getCachedSearch, setCachedSearch } from '../cache.js';
 import { logger } from '../logger.js';
 
 const sourcePriority = new Map<string, number>([
-  ['gutenberg', 2],
+  ['gutenberg', 3],
+  ['anna', 2],
   ['libgen', 1],
 ]);
 
 const sources: Source[] = [
   new GutenbergSource(),
+  new AnnaArchiveSource(),
   new LibgenSource(),
 ];
 
