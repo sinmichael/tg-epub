@@ -3,4 +3,5 @@ dist/
 data/
 .env
 *.md
+!README.md
 test-*
