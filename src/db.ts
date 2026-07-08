@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { config } from './config.js';
+import { logger } from './logger.js';
 
 const dbPath = join(config.dataDir, 'tg-epub.db');
 
@@ -60,6 +61,45 @@ db.exec(`
     first_seen INTEGER NOT NULL,
     last_active INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS _schema_version (
+    version INTEGER PRIMARY KEY
+  );
 `);
+
+type Migration = { version: number; name: string; up: string };
+
+const migrations: Migration[] = [
+  {
+    version: 1,
+    name: 'history_user_idx',
+    up: 'CREATE INDEX IF NOT EXISTS idx_history_user_time ON history(user_id, downloaded_at DESC);',
+  },
+];
+
+function runMigrations(): void {
+  const currentVersion = (db.prepare(
+    'SELECT COALESCE(MAX(version), 0) as v FROM _schema_version',
+  ).get() as { v: number }).v;
+
+  const pending = migrations.filter((m) => m.version > currentVersion).sort((a, b) => a.version - b.version);
+
+  if (pending.length === 0) {
+    logger.debug('No pending database migrations');
+    return;
+  }
+
+  logger.info({ pending: pending.map((m) => `${m.version}:${m.name}`) }, 'Running database migrations');
+
+  for (const m of pending) {
+    db.transaction(() => {
+      db.exec(m.up);
+      db.prepare('INSERT INTO _schema_version (version) VALUES (?)').run(m.version);
+    })();
+    logger.info({ version: m.version, name: m.name }, 'Migration applied');
+  }
+}
+
+runMigrations();
 
 export default db;

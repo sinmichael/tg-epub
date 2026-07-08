@@ -18,6 +18,14 @@ export function cooldownMiddleware(): MiddlewareFn<Context> {
     }
 
     userCooldowns.set(userId, now);
+
+    if (userCooldowns.size > 1000) {
+      const cutoff = now - config.cooldownSeconds * 2000;
+      for (const [id, time] of userCooldowns) {
+        if (time < cutoff) userCooldowns.delete(id);
+      }
+    }
+
     return next();
   };
 }

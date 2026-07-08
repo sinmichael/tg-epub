@@ -3,7 +3,7 @@ dotenv.config();
 
 export const config = {
   botToken: process.env.BOT_TOKEN ?? '',
-  adminIds: (process.env.ADMIN_IDS ?? '').split(',').map(Number).filter(Boolean),
+  adminIds: (process.env.ADMIN_IDS ?? '').split(',').map(Number).filter((n) => !isNaN(n)),
   dataDir: process.env.DATA_DIR ?? './data',
   logLevel: process.env.LOG_LEVEL ?? 'info',
   maxConcurrentDownloads: Number(process.env.MAX_CONCURRENT_DOWNLOADS) || 3,

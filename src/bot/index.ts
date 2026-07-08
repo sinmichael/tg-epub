@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import { searchAll, getSource, getSources } from '../scraper/registry.js';
 import { getPrefs, setPrefs, getUserSources, setUserSources } from '../preferences.js';
 import { enqueue } from '../queue.js';
+import pLimit from 'p-limit';
 import { createTempDir, cleanupTempDir, writeTempFile, isFileTooLarge } from '../storage.js';
 import { getCachedDownload, setCachedDownload, purgeSearchCache, purgeFileCache } from '../cache.js';
 import { searchResultsKeyboard, formatResultsList } from './keyboards.js';
@@ -11,7 +12,31 @@ import { logger } from '../logger.js';
 import db from '../db.js';
 
 import type { BookResult } from '../scraper/types.js';
-const resultCache = new Map<string, BookResult>();
+class TTLMap<V> {
+  private map = new Map<string, { value: V; expiresAt: number }>();
+
+  constructor(private ttlMs: number) {}
+
+  set(key: string, value: V): void {
+    this.map.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+  }
+
+  get(key: string): V | undefined {
+    const entry = this.map.get(key);
+    if (!entry) return;
+    if (Date.now() > entry.expiresAt) {
+      this.map.delete(key);
+      return;
+    }
+    return entry.value;
+  }
+
+  size(): number {
+    return this.map.size;
+  }
+}
+
+const resultCache = new TTLMap<BookResult>(30 * 60 * 1000);
 
 function trackUser(userId: number, username?: string): void {
   const now = Date.now();
@@ -40,6 +65,19 @@ function isAdmin(userId: number): boolean {
 function getAllUserIds(): number[] {
   const rows = db.prepare('SELECT user_id FROM users').all() as { user_id: number }[];
   return rows.map((r) => r.user_id);
+}
+
+function safeFileName(title: string): string {
+  const safe = title.replace(/[^a-zA-Z0-9 \u00C0-\u024F-]/g, '').trim().slice(0, 100);
+  return (safe || 'book') + '.epub';
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 function addHistory(userId: number, book: BookResult): void {
@@ -95,10 +133,6 @@ function getFavorites(userId: number): BookResult[] {
 export function createBot(): Telegraf {
   const bot = new Telegraf(config.botToken, { handlerTimeout: 300_000 });
 
-  bot.catch((err: unknown, ctx: any) => {
-    logger.error({ err: String(err), updateType: ctx?.updateType }, 'Bot handler error');
-  });
-
   bot.use(errorHandler());
   bot.use(cooldownMiddleware());
 
@@ -134,12 +168,11 @@ export function createBot(): Telegraf {
     const prefs = ctx.from ? getPrefs(ctx.from.id) : { sources: null, language: '', format: 'epub' };
 
     try {
-      const results = await Promise.race([
+      const results = await withTimeout(
         searchAll(query, 8, prefs.sources ?? undefined),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Search timed out')), 45_000),
-        ),
-      ]);
+        45_000,
+        'Search timed out',
+      );
 
       if (results.length === 0) {
         return ctx.telegram.editMessageText(
@@ -280,7 +313,7 @@ export function createBot(): Telegraf {
   });
 
   // ── Download callback ──
-  bot.action(/^download:(.+):(.+)$/, async (ctx) => {
+  bot.action(/^download:([^:]+):(.+)$/, async (ctx) => {
     const sourceName = ctx.match[1];
     const bookId = ctx.match[2];
 
@@ -320,7 +353,7 @@ export function createBot(): Telegraf {
 
       const tmpDir = createTempDir();
       try {
-        const fileName = `${book.title.replace(/[^a-zA-Z0-9 ]/g, '')}.epub`;
+        const fileName = safeFileName(book.title);
         const filePath = writeTempFile(tmpDir, fileName, buffer);
 
         await ctx.replyWithDocument(
@@ -358,7 +391,7 @@ export function createBot(): Telegraf {
 
         const tmpDir = createTempDir();
         try {
-          const fileName = `${book.title.replace(/[^a-zA-Z0-9 ]/g, '')}.epub`;
+          const fileName = safeFileName(book.title);
           const filePath = writeTempFile(tmpDir, fileName, buffer);
 
           await ctx.replyWithDocument(
@@ -409,19 +442,18 @@ export function createBot(): Telegraf {
     logger.info({ userId, textPreview: text.slice(0, 100) }, 'Admin: broadcast');
 
     const userIds = getAllUserIds();
-    let sent = 0;
-    let failed = 0;
 
     await ctx.reply(`Broadcasting to ${userIds.length} users...`);
 
-    for (const uid of userIds) {
-      try {
-        await ctx.telegram.sendMessage(uid, text, { parse_mode: 'HTML' });
-        sent++;
-      } catch {
-        failed++;
-      }
-    }
+    const limit = pLimit(10);
+    const results = await Promise.allSettled(
+      userIds.map((uid) =>
+        limit(() => ctx.telegram.sendMessage(uid, text, { parse_mode: 'HTML' })),
+      ),
+    );
+
+    const sent = results.filter((r) => r.status === 'fulfilled').length;
+    const failed = results.filter((r) => r.status === 'rejected').length;
 
     logger.info({ totalSent: sent, totalFailed: failed }, 'Admin: broadcast done');
     await ctx.reply(`Done. Sent: ${sent}, Failed: ${failed}`);

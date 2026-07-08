@@ -3,6 +3,7 @@ import type { BookResult, Source } from '../types.js';
 import { httpClient } from '../../transport.js';
 import { logger } from '../../logger.js';
 import { LibgenSource } from './libgen.js';
+import { sleep } from '../utils.js';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
@@ -11,9 +12,7 @@ const MIRRORS = [
   'https://annas-archive.pk',
 ];
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
+
 
 function parseSize(text: string): number | undefined {
   const match = text.trim().match(/^([\d.]+)\s*MB$/i);
