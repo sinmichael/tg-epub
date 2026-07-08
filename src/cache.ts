@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { config } from './config.js';
 import db from './db.js';
@@ -76,4 +76,25 @@ export function setCachedDownload(sourceId: string, buffer: Buffer): string {
   ).run(sourceId, path, buffer.length, Date.now());
 
   return path;
+}
+
+export function purgeSearchCache(): number {
+  const { changes } = db.prepare('DELETE FROM search_cache').run();
+  logger.info({ deletedRows: changes }, 'Search cache purged');
+  return changes;
+}
+
+export function purgeFileCache(): { dbRows: number; diskFiles: number } {
+  const { changes: dbRows } = db.prepare('DELETE FROM file_cache').run();
+  const dir = join(config.dataDir, 'file-cache');
+  let diskFiles = 0;
+  try {
+    const files = readdirSync(dir);
+    for (const f of files) {
+      rmSync(join(dir, f), { force: true });
+      diskFiles++;
+    }
+  } catch {}
+  logger.info({ dbRows, diskFiles }, 'File cache purged');
+  return { dbRows, diskFiles };
 }

@@ -4,7 +4,7 @@ import { searchAll, getSource, getSources } from '../scraper/registry.js';
 import { getPrefs, setPrefs, getUserSources, setUserSources } from '../preferences.js';
 import { enqueue } from '../queue.js';
 import { createTempDir, cleanupTempDir, writeTempFile, isFileTooLarge } from '../storage.js';
-import { getCachedDownload, setCachedDownload } from '../cache.js';
+import { getCachedDownload, setCachedDownload, purgeSearchCache, purgeFileCache } from '../cache.js';
 import { searchResultsKeyboard, formatResultsList } from './keyboards.js';
 import { cooldownMiddleware, errorHandler } from './middleware.js';
 import { logger } from '../logger.js';
@@ -456,6 +456,15 @@ export function createBot(): Telegraf {
       logger.error({ err }, 'Admin: health check FAILED');
       await ctx.reply('❌ Database error');
     }
+  });
+
+  bot.command('purgecache', async (ctx) => {
+    if (!isAdmin(ctx.from?.id ?? 0)) return;
+
+    logger.info({ adminId: ctx.from?.id }, 'Admin: purge cache');
+    const s = purgeSearchCache();
+    const f = purgeFileCache();
+    await ctx.reply(`Purged ${s} search cache entries and ${f.dbRows} file cache entries (${f.diskFiles} files).`);
   });
 
   return bot;
