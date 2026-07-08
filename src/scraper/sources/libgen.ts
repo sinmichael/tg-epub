@@ -1,6 +1,9 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { BookResult, Source } from '../types.js';
+import { logger } from '../../logger.js';
+
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
 function parseSize(text: string): number | undefined {
   const match = text.trim().match(/^([\d.]+)\s*(?:MB|MiB)$/i);
@@ -19,22 +22,29 @@ export class LibgenSource implements Source {
   readonly name = 'libgen';
 
   async search(query: string, limit = 10): Promise<BookResult[]> {
-    const { data: html } = await axios.get('https://libgen.li/index.php', {
+    logger.debug({ source: this.name, query, limit }, 'Source search');
+
+    const { data: html, status } = await axios.get('https://libgen.li/index.php', {
       params: { req: query, res: Math.min(limit, 25), page: 1, sort: 'def', sortmode: 'ASC' },
       timeout: 20_000,
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-          + '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-      },
+      headers: { 'User-Agent': UA },
+      validateStatus: (s) => s < 500,
     });
 
+    if (status !== 200) {
+      logger.warn({ source: this.name, status, query }, 'LibGen search returned non-200');
+      return [];
+    }
+
     const $ = cheerio.load(html);
-    const rows = $('table.table-striped tr').filter((_, el) => $(el).find('td').length === 9);
+    const allRows = $('table.table-striped tr').filter((_, el) => $(el).find('td').length === 9);
+    const dataRows = allRows.length;
+
+    logger.debug({ source: this.name, query, dataRows }, 'LibGen HTML parsed');
 
     const results: BookResult[] = [];
 
-    rows.each((_, row) => {
+    allRows.each((_, row) => {
       const tds = $(row).find('td');
 
       const titleEl = tds.eq(0).find('a').first();
@@ -46,7 +56,6 @@ export class LibgenSource implements Source {
       if (ext !== 'epub') return;
       if (!title || !author) return;
 
-      // Find MD5 from mirror links
       const mirrorLinks: string[] = [];
       tds.eq(8).find('a').each((_, a) => {
         const href = $(a).attr('href') ?? '';
@@ -71,22 +80,28 @@ export class LibgenSource implements Source {
       });
     });
 
+    logger.debug({ source: this.name, query, epubCount: results.length }, 'Source search done');
     return results.slice(0, limit);
   }
 
   async download(book: BookResult): Promise<Buffer> {
-    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+    logger.debug({ source: this.name, bookId: book.id }, 'Download step 1: fetching key page');
 
-    // Step 1: get the download page to extract the key
-    const { data: html } = await axios.get(book.downloadUrl, {
+    const { data: html, status: s1 } = await axios.get(book.downloadUrl, {
       timeout: 20_000,
       headers: { 'User-Agent': UA, Referer: 'https://libgen.li/' },
+      validateStatus: (s) => s < 500,
     });
+
+    if (s1 !== 200) {
+      throw new Error(`LibGen key page returned status ${s1}`);
+    }
 
     const $ = cheerio.load(html);
     const keyLink = $('a[href*="get.php"][href*="md5"][href*="key"]').attr('href');
 
     if (!keyLink) {
+      logger.error({ bookId: book.id, htmlPreview: html.slice(0, 300) }, 'LibGen key not found in page');
       throw new Error('Could not find download key on LibGen page');
     }
 
@@ -94,13 +109,21 @@ export class LibgenSource implements Source {
       ? keyLink
       : `https://libgen.li${keyLink.startsWith('/') ? '' : '/'}${keyLink}`;
 
-    // Step 2: download with the key
-    const { data } = await axios.get(fullUrl, {
+    logger.debug({ source: this.name, bookId: book.id }, 'Download step 2: fetching file with key');
+
+    const { data, status: s2 } = await axios.get(fullUrl, {
       responseType: 'arraybuffer',
       timeout: 120_000,
       headers: { 'User-Agent': UA, Referer: book.downloadUrl },
+      validateStatus: (s) => s < 500,
     });
 
-    return Buffer.from(data);
+    if (s2 !== 200) {
+      throw new Error(`LibGen download returned status ${s2}`);
+    }
+
+    const buffer = Buffer.from(data);
+    logger.debug({ source: this.name, bookId: book.id, size: buffer.length }, 'Download complete');
+    return buffer;
   }
 }

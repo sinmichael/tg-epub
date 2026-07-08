@@ -13,12 +13,18 @@ import db from '../db.js';
 import type { BookResult } from '../scraper/types.js';
 const resultCache = new Map<string, BookResult>();
 
-function trackUser(userId: number): void {
+function trackUser(userId: number, username?: string): void {
   const now = Date.now();
+  const existing = db.prepare('SELECT first_seen FROM users WHERE user_id = ?').get(userId) as { first_seen: number } | undefined;
+
   db.prepare(`
     INSERT INTO users (user_id, first_seen, last_active) VALUES (?, ?, ?)
     ON CONFLICT(user_id) DO UPDATE SET last_active = excluded.last_active
   `).run(userId, now, now);
+
+  if (!existing) {
+    logger.info({ userId, username }, 'New user');
+  }
 }
 
 function isBanned(userId: number): boolean {
@@ -92,9 +98,8 @@ export function createBot(): Telegraf {
   bot.use(errorHandler());
   bot.use(cooldownMiddleware());
 
-  // Track every user interaction
   bot.use((ctx, next) => {
-    if (ctx.from?.id) trackUser(ctx.from.id);
+    if (ctx.from?.id) trackUser(ctx.from.id, ctx.from.username);
     return next();
   });
 
@@ -118,6 +123,8 @@ export function createBot(): Telegraf {
     if (!query) {
       return ctx.reply('Please provide a search query. Example: /search moby dick');
     }
+
+    logger.info({ userId: ctx.from?.id, query }, 'Command: search');
 
     const msg = await ctx.reply('Searching...');
     const prefs = ctx.from ? getPrefs(ctx.from.id) : { sources: null, language: '', format: 'epub' };
@@ -272,18 +279,22 @@ export function createBot(): Telegraf {
 
     const book = resultCache.get(`${sourceName}:${bookId}`);
     if (!book) {
+      logger.warn({ userId: ctx.from?.id, sourceName, bookId }, 'Download: session expired');
       return ctx.editMessageText('Session expired. Please search again.');
     }
 
     const source = getSource(sourceName);
     if (!source) {
+      logger.warn({ sourceName }, 'Download: unknown source');
       return ctx.editMessageText('Unknown source.');
     }
 
-    // Check banned
     if (ctx.from && isBanned(ctx.from.id)) {
+      logger.warn({ userId: ctx.from.id }, 'Download: banned user attempted download');
       return ctx.editMessageText('You are banned from using this bot.');
     }
+
+    logger.info({ userId: ctx.from?.id, sourceName, bookId, title: book.title }, 'Download requested');
 
     const sourceId = `${sourceName}:${bookId}`;
     const cachedPath = getCachedDownload(sourceId);
@@ -386,6 +397,8 @@ export function createBot(): Telegraf {
     const text = ctx.message.text.slice('/broadcast'.length).trim();
     if (!text) return ctx.reply('Usage: /broadcast &lt;message&gt;');
 
+    logger.info({ userId, textPreview: text.slice(0, 100) }, 'Admin: broadcast');
+
     const userIds = getAllUserIds();
     let sent = 0;
     let failed = 0;
@@ -401,6 +414,7 @@ export function createBot(): Telegraf {
       }
     }
 
+    logger.info({ totalSent: sent, totalFailed: failed }, 'Admin: broadcast done');
     await ctx.reply(`Done. Sent: ${sent}, Failed: ${failed}`);
   });
 
@@ -410,6 +424,7 @@ export function createBot(): Telegraf {
     const targetId = Number(arg);
     if (!targetId) return ctx.reply('Usage: /ban &lt;user_id&gt;');
 
+    logger.info({ adminId: ctx.from?.id, targetId }, 'Admin: ban');
     db.prepare('UPDATE users SET banned = 1 WHERE user_id = ?').run(targetId);
     await ctx.reply(`Banned user ${targetId}`);
   });
@@ -420,6 +435,7 @@ export function createBot(): Telegraf {
     const targetId = Number(arg);
     if (!targetId) return ctx.reply('Usage: /unban &lt;user_id&gt;');
 
+    logger.info({ adminId: ctx.from?.id, targetId }, 'Admin: unban');
     db.prepare('UPDATE users SET banned = 0 WHERE user_id = ?').run(targetId);
     await ctx.reply(`Unbanned user ${targetId}`);
   });
@@ -429,8 +445,10 @@ export function createBot(): Telegraf {
 
     try {
       db.prepare('SELECT 1').get();
+      logger.debug('Admin: health check OK');
       await ctx.reply('✅ Database OK');
-    } catch {
+    } catch (err) {
+      logger.error({ err }, 'Admin: health check FAILED');
       await ctx.reply('❌ Database error');
     }
   });

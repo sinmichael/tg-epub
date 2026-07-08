@@ -2,6 +2,7 @@ import type { BookResult, Source } from './types.js';
 import { GutenbergSource } from './sources/gutenberg.js';
 import { LibgenSource } from './sources/libgen.js';
 import { getCachedSearch, setCachedSearch } from '../cache.js';
+import { logger } from '../logger.js';
 
 const sourcePriority = new Map<string, number>([
   ['gutenberg', 2],
@@ -42,6 +43,7 @@ function normalizeAuthor(author: string): string {
 
 function deduplicate(books: BookResult[]): BookResult[] {
   const seen = new Map<string, BookResult>();
+  let duplicatesRemoved = 0;
 
   for (const book of books) {
     const key = `${normalizeTitle(book.title)}|${normalizeAuthor(book.author)}`;
@@ -50,12 +52,17 @@ function deduplicate(books: BookResult[]): BookResult[] {
     if (!existing) {
       seen.set(key, book);
     } else {
+      duplicatesRemoved++;
       const existingPrio = sourcePriority.get(existing.source) ?? 0;
       const incomingPrio = sourcePriority.get(book.source) ?? 0;
       if (incomingPrio > existingPrio) {
         seen.set(key, book);
       }
     }
+  }
+
+  if (duplicatesRemoved > 0) {
+    logger.debug({ duplicatesRemoved, totalBefore: books.length, totalAfter: seen.size }, 'Dedup removed entries');
   }
 
   return [...seen.values()];
@@ -74,7 +81,9 @@ export async function searchAll(
   limitPerSource = 5,
   sourceNames?: string[],
 ): Promise<BookResult[]> {
-  // Check cache first
+  const nameList = sourceNames?.join(',') || 'all';
+  logger.debug({ query, sources: nameList, limitPerSource }, 'Search requested');
+
   const cached = getCachedSearch(query);
   if (cached) return cached;
 
@@ -82,19 +91,26 @@ export async function searchAll(
     ? sourceNames.map((n) => sourceMap.get(n)).filter(Boolean) as Source[]
     : sources;
 
-  const results = await Promise.allSettled(
+  const settled = await Promise.allSettled(
     active.map((s) => s.search(query, limitPerSource)),
   );
 
   const books: BookResult[] = [];
-  for (const result of results) {
+  for (let i = 0; i < settled.length; i++) {
+    const result = settled[i];
+    const name = active[i].name;
     if (result.status === 'fulfilled') {
       books.push(...result.value);
+      logger.debug({ source: name, count: result.value.length }, 'Source search succeeded');
+    } else {
+      logger.warn({ source: name, err: result.reason }, 'Source search failed');
     }
   }
 
   const sorted = sortByPriority(books);
   const deduplicated = deduplicate(sorted);
+
+  logger.info({ query, sources: nameList, rawCount: books.length, finalCount: deduplicated.length }, 'Search complete');
 
   setCachedSearch(query, deduplicated);
 
