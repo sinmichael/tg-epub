@@ -1,6 +1,6 @@
-import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { BookResult, Source } from '../types.js';
+import { httpClient } from '../../transport.js';
 import { logger } from '../../logger.js';
 
 const UAS = [
@@ -94,7 +94,7 @@ async function trySearch(
 ): Promise<SearchOutcome> {
   const ua = randomUA();
   try {
-    const { data: html, status } = await axios.get(`${baseUrl}/index.php`, {
+      const { data: html, status } = await httpClient.get(`${baseUrl}/index.php`, {
       params: { req: query, res: Math.min(limit, 25), page: 1, sort: 'def', sortmode: 'ASC' },
       timeout: 20_000,
       headers: { 'User-Agent': ua, Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
@@ -124,7 +124,7 @@ async function tryDownload(
   try {
     const downloadUrl = `${baseUrl}/get.php?md5=${md5}`;
 
-    const { data: html, status: s1 } = await axios.get(downloadUrl, {
+    const { data: html, status: s1 } = await httpClient.get(downloadUrl, {
       timeout: 20_000,
       headers: { 'User-Agent': ua, Referer: `${baseUrl}/` },
       validateStatus: (s) => s < 500,
@@ -147,7 +147,7 @@ async function tryDownload(
       ? keyLink
       : `${baseUrl}${keyLink.startsWith('/') ? '' : '/'}${keyLink}`;
 
-    const { data, status: s2 } = await axios.get(fullUrl, {
+    const { data, status: s2 } = await httpClient.get(fullUrl, {
       responseType: 'arraybuffer',
       timeout: 120_000,
       headers: { 'User-Agent': ua, Referer: downloadUrl },

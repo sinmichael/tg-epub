@@ -1,6 +1,6 @@
-import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { BookResult, Source } from '../types.js';
+import { httpClient } from '../../transport.js';
 import { logger } from '../../logger.js';
 import { LibgenSource } from './libgen.js';
 
@@ -78,7 +78,7 @@ async function trySearch(
   limit: number,
 ): Promise<BookResult[] | null> {
   try {
-    const { data: html, status } = await axios.get(`${baseUrl}/search`, {
+    const { data: html, status } = await httpClient.get(`${baseUrl}/search`, {
       params: { q: query, ext: 'epub' },
       timeout: 20_000,
       headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
@@ -106,7 +106,7 @@ async function trySlowDownload(
   for (let i = 5; i <= 9; i++) {
     const ua = UA;
     try {
-      const { data, status } = await axios.get(`${baseUrl}/slow_download/${md5}/0/${i}`, {
+      const { data, status } = await httpClient.get(`${baseUrl}/slow_download/${md5}/0/${i}`, {
         responseType: 'arraybuffer',
         timeout: 60_000,
         headers: { 'User-Agent': ua, Referer: `${baseUrl}/` },

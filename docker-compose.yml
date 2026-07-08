@@ -1,13 +1,23 @@
 services:
+  tor:
+    image: dperson/torproxy:latest
+    container_name: tg-epub-tor
+    restart: unless-stopped
+    read_only: true
+    mem_limit: 128m
+
   tg-epub:
     build: .
     container_name: tg-epub
     restart: unless-stopped
+    depends_on:
+      - tor
     env_file: .env
     volumes:
       - tg-epub-data:/app/data
     environment:
       - DATA_DIR=/app/data
+      - PROXY_URL=socks5://tor:9050
 
 volumes:
   tg-epub-data:
