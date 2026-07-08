@@ -93,7 +93,11 @@ function getFavorites(userId: number): BookResult[] {
 }
 
 export function createBot(): Telegraf {
-  const bot = new Telegraf(config.botToken);
+  const bot = new Telegraf(config.botToken, { handlerTimeout: 300_000 });
+
+  bot.catch((err: unknown, ctx: any) => {
+    logger.error({ err: String(err), updateType: ctx?.updateType }, 'Bot handler error');
+  });
 
   bot.use(errorHandler());
   bot.use(cooldownMiddleware());
