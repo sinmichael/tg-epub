@@ -9,14 +9,18 @@ A Telegram bot that scrapes EPUB books from multiple sources and delivers them t
 
 | Source | Search | Download | Status |
 |--------|--------|----------|--------|
+| Standard Ebooks | ✅ | ✅ | Direct HTTP |
 | Project Gutenberg (Gutendex API) | ✅ | ✅ | Direct HTTP |
 | LibGen (6 mirrors: li, bz, gl, is, rs, st) | ✅ | ✅ | Via Tor SOCKS5 |
-| Anna's Archive (annas-archive.gl / .pk) | ✅ | ❌ (DDoS-Guard) | Falls back to LibGen MD5 |
+| Fadedpage | ✅ | ✅ | Direct HTTP |
+| Planet eBook | ✅ | ✅ | Direct HTTP |
 
 ### Source Priority (dedup)
 1. LibGen (3)
-2. Anna's Archive (2)
+2. Standard Ebooks (2)
 3. Gutenberg (1)
+4. Fadedpage (1)
+5. Planet eBook (1)
 
 ---
 
@@ -90,7 +94,9 @@ tg-epub/
 │   │   └── sources/
 │   │       ├── gutenberg.ts   # Gutendex API source
 │   │       ├── libgen.ts      # Multi-mirror LibGen with geo-block detect
-│   │       └── anna.ts        # Anna's Archive with LibGen download fallback
+│   │       ├── standard.ts    # Standard Ebooks (public domain, curated)
+│   │       ├── fadedpage.ts   # Fadedpage (Canadian public domain)
+│   │       └── planetebook.ts # Planet eBook (classics catalog)
 │   ├── transport.ts           # Proxy-aware axios instance
 │   ├── cache.ts               # Search + file cache (SQLite)
 │   ├── db.ts                  # SQLite schema & connection
@@ -144,6 +150,7 @@ sudo docker compose up -d --build
 
 ## Known Issues
 - LibGen is geo-blocked from Oracle Cloud; Tor works but is slower.
-- Anna's Archive download endpoints behind DDoS-Guard; falls back to LibGen MD5.
+- Planet eBook has a small catalog (~80 books, no search endpoint — scrapes homepage).
+- Fadedpage requires POST form for search (GET not supported).
 - No inline mode yet.
 - No format conversion yet.
