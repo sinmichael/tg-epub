@@ -1,5 +1,6 @@
 import type { Context, MiddlewareFn } from 'telegraf';
 import { config } from '../config.js';
+import { logger } from '../logger.js';
 
 const userCooldowns = new Map<number, number>();
 
@@ -24,7 +25,7 @@ export function cooldownMiddleware(): MiddlewareFn<Context> {
 export function errorHandler(): MiddlewareFn<Context> {
   return (ctx, next) => {
     return next().catch((err: Error) => {
-      console.error(`Error for user ${ctx.from?.id}:`, err.message);
+      logger.error({ err, userId: ctx.from?.id }, 'Unhandled error');
       return ctx.reply('Something went wrong. Please try again later.').catch(() => {});
     });
   };

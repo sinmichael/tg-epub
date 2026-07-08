@@ -1,8 +1,8 @@
 import type { BookResult, Source } from './types.js';
 import { GutenbergSource } from './sources/gutenberg.js';
 import { LibgenSource } from './sources/libgen.js';
+import { getCachedSearch, setCachedSearch } from '../cache.js';
 
-// Higher number = higher priority when merging duplicates
 const sourcePriority = new Map<string, number>([
   ['gutenberg', 2],
   ['libgen', 1],
@@ -50,7 +50,6 @@ function deduplicate(books: BookResult[]): BookResult[] {
     if (!existing) {
       seen.set(key, book);
     } else {
-      // Keep the higher-priority source
       const existingPrio = sourcePriority.get(existing.source) ?? 0;
       const incomingPrio = sourcePriority.get(book.source) ?? 0;
       if (incomingPrio > existingPrio) {
@@ -75,6 +74,10 @@ export async function searchAll(
   limitPerSource = 5,
   sourceNames?: string[],
 ): Promise<BookResult[]> {
+  // Check cache first
+  const cached = getCachedSearch(query);
+  if (cached) return cached;
+
   const active = sourceNames
     ? sourceNames.map((n) => sourceMap.get(n)).filter(Boolean) as Source[]
     : sources;
@@ -91,5 +94,9 @@ export async function searchAll(
   }
 
   const sorted = sortByPriority(books);
-  return deduplicate(sorted);
+  const deduplicated = deduplicate(sorted);
+
+  setCachedSearch(query, deduplicated);
+
+  return deduplicated;
 }

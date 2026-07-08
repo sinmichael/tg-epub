@@ -1,14 +1,90 @@
 import { Telegraf, Markup } from 'telegraf';
 import { config } from '../config.js';
 import { searchAll, getSource, getSources } from '../scraper/registry.js';
-import { getUserSources, setUserSources } from '../user-store.js';
+import { getPrefs, setPrefs, getUserSources, setUserSources } from '../preferences.js';
 import { enqueue } from '../queue.js';
 import { createTempDir, cleanupTempDir, writeTempFile, isFileTooLarge } from '../storage.js';
+import { getCachedDownload, setCachedDownload } from '../cache.js';
 import { searchResultsKeyboard, formatResultsList } from './keyboards.js';
 import { cooldownMiddleware, errorHandler } from './middleware.js';
+import { logger } from '../logger.js';
+import db from '../db.js';
 
 import type { BookResult } from '../scraper/types.js';
 const resultCache = new Map<string, BookResult>();
+
+function trackUser(userId: number): void {
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO users (user_id, first_seen, last_active) VALUES (?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET last_active = excluded.last_active
+  `).run(userId, now, now);
+}
+
+function isBanned(userId: number): boolean {
+  const row = db.prepare('SELECT banned FROM users WHERE user_id = ?')
+    .get(userId) as { banned: number } | undefined;
+  return row?.banned === 1;
+}
+
+function isAdmin(userId: number): boolean {
+  return config.adminIds.includes(userId);
+}
+
+function getAllUserIds(): number[] {
+  const rows = db.prepare('SELECT user_id FROM users').all() as { user_id: number }[];
+  return rows.map((r) => r.user_id);
+}
+
+function addHistory(userId: number, book: BookResult): void {
+  db.prepare(`
+    INSERT INTO history (user_id, source, book_id, title, author, downloaded_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(userId, book.source, book.id, book.title, book.author, Date.now());
+}
+
+function getHistory(userId: number, limit = 10): BookResult[] {
+  const rows = db.prepare(`
+    SELECT source, book_id, title, author FROM history
+    WHERE user_id = ? ORDER BY downloaded_at DESC LIMIT ?
+  `).all(userId, limit) as { source: string; book_id: string; title: string; author: string }[];
+
+  return rows.map((r) => ({
+    id: r.book_id,
+    source: r.source,
+    title: r.title,
+    author: r.author,
+    downloadUrl: '',
+  })) as BookResult[];
+}
+
+function addFavorite(userId: number, book: BookResult): void {
+  db.prepare(`
+    INSERT OR IGNORE INTO favorites (user_id, source, book_id, title, author, added_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(userId, book.source, book.id, book.title, book.author, Date.now());
+}
+
+function removeFavorite(userId: number, source: string, bookId: string): void {
+  db.prepare(
+    'DELETE FROM favorites WHERE user_id = ? AND source = ? AND book_id = ?',
+  ).run(userId, source, bookId);
+}
+
+function getFavorites(userId: number): BookResult[] {
+  const rows = db.prepare(`
+    SELECT source, book_id, title, author FROM favorites
+    WHERE user_id = ? ORDER BY added_at DESC
+  `).all(userId) as { source: string; book_id: string; title: string; author: string }[];
+
+  return rows.map((r) => ({
+    id: r.book_id,
+    source: r.source,
+    title: r.title,
+    author: r.author,
+    downloadUrl: '',
+  })) as BookResult[];
+}
 
 export function createBot(): Telegraf {
   const bot = new Telegraf(config.botToken);
@@ -16,14 +92,27 @@ export function createBot(): Telegraf {
   bot.use(errorHandler());
   bot.use(cooldownMiddleware());
 
+  // Track every user interaction
+  bot.use((ctx, next) => {
+    if (ctx.from?.id) trackUser(ctx.from.id);
+    return next();
+  });
+
   bot.start((ctx) => {
     return ctx.reply(
-      'Welcome! Send /search &lt;query&gt; to find EPUB books.\n'
-      + 'Use /source to choose which sources to search.\n'
-      + 'Example: /search moby dick',
+      'Welcome! Send /search &lt;query&gt; to find EPUB books.\n\n'
+      + '<b>Commands:</b>\n'
+      + '/search &lt;query&gt; — search and download EPUBs\n'
+      + '/source — choose which sources to search\n'
+      + '/favorites — view your saved books\n'
+      + '/history — view recent downloads\n'
+      + '/language &lt;code&gt; — filter by language (e.g. en, ru)\n\n'
+      + 'Example: /search dune',
+      { parse_mode: 'HTML' },
     );
   });
 
+  // ── Search ──
   bot.command('search', async (ctx) => {
     const query = ctx.message.text.slice('/search'.length).trim();
     if (!query) {
@@ -31,10 +120,10 @@ export function createBot(): Telegraf {
     }
 
     const msg = await ctx.reply('Searching...');
-    const sources = ctx.from ? getUserSources(ctx.from.id) : null;
+    const prefs = ctx.from ? getPrefs(ctx.from.id) : { sources: null, language: '', format: 'epub' };
 
     try {
-      const results = await searchAll(query, 8, sources ?? undefined);
+      const results = await searchAll(query, 8, prefs.sources ?? undefined);
 
       if (results.length === 0) {
         return ctx.telegram.editMessageText(
@@ -54,7 +143,8 @@ export function createBot(): Telegraf {
         `<b>Found ${results.length} result(s):</b>\n\n${list}`,
         { ...kb, parse_mode: 'HTML' },
       );
-    } catch {
+    } catch (err) {
+      logger.error({ err }, 'Search failed');
       await ctx.telegram.editMessageText(
         ctx.chat.id, msg.message_id, undefined,
         'Search failed. Please try again later.',
@@ -62,6 +152,7 @@ export function createBot(): Telegraf {
     }
   });
 
+  // ── Source ──
   bot.command('source', async (ctx) => {
     const userId = ctx.from?.id;
     if (!userId) return;
@@ -116,6 +207,63 @@ export function createBot(): Telegraf {
     }
   });
 
+  // ── Language ──
+  bot.command('language', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const arg = ctx.message.text.slice('/language'.length).trim().toLowerCase();
+    if (!arg) {
+      const prefs = getPrefs(userId);
+      const current = prefs.language || 'none (all languages)';
+      return ctx.reply(`Current language filter: ${current}\nUsage: /language en`);
+    }
+
+    setPrefs(userId, { language: arg });
+    return ctx.reply(`Language filter set to: ${arg}`);
+  });
+
+  // ── Favorites ──
+  bot.command('favorites', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const favs = getFavorites(userId);
+    if (favs.length === 0) {
+      return ctx.reply('No favorites yet. When you download a book, tap the star to save it.');
+    }
+
+    for (const book of favs) {
+      resultCache.set(`${book.source}:${book.id}`, book);
+    }
+
+    const msg = await ctx.reply(`<b>Your favorites (${favs.length}):</b>\n\n${formatResultsList(favs)}`, {
+      parse_mode: 'HTML',
+      ...searchResultsKeyboard(favs),
+    });
+  });
+
+  // ── History ──
+  bot.command('history', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const hist = getHistory(userId, 10);
+    if (hist.length === 0) {
+      return ctx.reply('No download history yet.');
+    }
+
+    for (const book of hist) {
+      resultCache.set(`${book.source}:${book.id}`, book);
+    }
+
+    await ctx.reply(`<b>Recent downloads:</b>\n\n${formatResultsList(hist)}`, {
+      parse_mode: 'HTML',
+      ...searchResultsKeyboard(hist),
+    });
+  });
+
+  // ── Download callback ──
   bot.action(/^download:(.+):(.+)$/, async (ctx) => {
     const sourceName = ctx.match[1];
     const bookId = ctx.match[2];
@@ -130,6 +278,42 @@ export function createBot(): Telegraf {
     const source = getSource(sourceName);
     if (!source) {
       return ctx.editMessageText('Unknown source.');
+    }
+
+    // Check banned
+    if (ctx.from && isBanned(ctx.from.id)) {
+      return ctx.editMessageText('You are banned from using this bot.');
+    }
+
+    const sourceId = `${sourceName}:${bookId}`;
+    const cachedPath = getCachedDownload(sourceId);
+
+    if (cachedPath) {
+      const { readFileSync } = await import('node:fs');
+      const buffer = readFileSync(cachedPath);
+
+      if (isFileTooLarge(buffer.length)) {
+        return ctx.editMessageText(
+          `File too large (${(buffer.length / 1e6).toFixed(1)}MB). Direct link: ${book.downloadUrl}`,
+        );
+      }
+
+      const tmpDir = createTempDir();
+      try {
+        const fileName = `${book.title.replace(/[^a-zA-Z0-9 ]/g, '')}.epub`;
+        const filePath = writeTempFile(tmpDir, fileName, buffer);
+
+        await ctx.replyWithDocument(
+          { source: filePath, filename: fileName },
+          { caption: `${book.title}\n${book.author} [cached]` },
+        );
+        await ctx.deleteMessage().catch(() => {});
+      } finally {
+        cleanupTempDir(tmpDir);
+      }
+
+      if (ctx.from) addHistory(ctx.from.id, book);
+      return;
     }
 
     const sizeHint = book.fileSize
@@ -150,6 +334,8 @@ export function createBot(): Telegraf {
           return;
         }
 
+        setCachedDownload(sourceId, buffer);
+
         const tmpDir = createTempDir();
         try {
           const fileName = `${book.title.replace(/[^a-zA-Z0-9 ]/g, '')}.epub`;
@@ -164,9 +350,88 @@ export function createBot(): Telegraf {
         } finally {
           cleanupTempDir(tmpDir);
         }
+
+        if (ctx.from) addHistory(ctx.from.id, book);
       });
-    } catch {
+    } catch (err) {
+      logger.error({ err, source: sourceName, bookId }, 'Download failed');
       await ctx.editMessageText('Download failed. The source may be unavailable.');
+    }
+  });
+
+  // ── Admin commands ──
+  bot.command('stats', async (ctx) => {
+    if (!isAdmin(ctx.from?.id ?? 0)) return;
+
+    const userCount = (db.prepare('SELECT COUNT(*) as c FROM users').get() as { c: number }).c;
+    const favCount = (db.prepare('SELECT COUNT(*) as c FROM favorites').get() as { c: number }).c;
+    const histCount = (db.prepare('SELECT COUNT(*) as c FROM history').get() as { c: number }).c;
+    const searchCacheCount = (db.prepare('SELECT COUNT(*) as c FROM search_cache').get() as { c: number }).c;
+
+    await ctx.reply(
+      `<b>Bot Stats</b>\n\n`
+      + `Users: ${userCount}\n`
+      + `Favorites saved: ${favCount}\n`
+      + `Downloads recorded: ${histCount}\n`
+      + `Search cache entries: ${searchCacheCount}\n`
+      + `Sources: ${getSources().map((s) => s.name).join(', ')}`,
+      { parse_mode: 'HTML' },
+    );
+  });
+
+  bot.command('broadcast', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!isAdmin(userId ?? 0)) return;
+
+    const text = ctx.message.text.slice('/broadcast'.length).trim();
+    if (!text) return ctx.reply('Usage: /broadcast &lt;message&gt;');
+
+    const userIds = getAllUserIds();
+    let sent = 0;
+    let failed = 0;
+
+    await ctx.reply(`Broadcasting to ${userIds.length} users...`);
+
+    for (const uid of userIds) {
+      try {
+        await ctx.telegram.sendMessage(uid, text, { parse_mode: 'HTML' });
+        sent++;
+      } catch {
+        failed++;
+      }
+    }
+
+    await ctx.reply(`Done. Sent: ${sent}, Failed: ${failed}`);
+  });
+
+  bot.command('ban', async (ctx) => {
+    if (!isAdmin(ctx.from?.id ?? 0)) return;
+    const arg = ctx.message.text.slice('/ban'.length).trim();
+    const targetId = Number(arg);
+    if (!targetId) return ctx.reply('Usage: /ban &lt;user_id&gt;');
+
+    db.prepare('UPDATE users SET banned = 1 WHERE user_id = ?').run(targetId);
+    await ctx.reply(`Banned user ${targetId}`);
+  });
+
+  bot.command('unban', async (ctx) => {
+    if (!isAdmin(ctx.from?.id ?? 0)) return;
+    const arg = ctx.message.text.slice('/unban'.length).trim();
+    const targetId = Number(arg);
+    if (!targetId) return ctx.reply('Usage: /unban &lt;user_id&gt;');
+
+    db.prepare('UPDATE users SET banned = 0 WHERE user_id = ?').run(targetId);
+    await ctx.reply(`Unbanned user ${targetId}`);
+  });
+
+  bot.command('health', async (ctx) => {
+    if (!isAdmin(ctx.from?.id ?? 0)) return;
+
+    try {
+      db.prepare('SELECT 1').get();
+      await ctx.reply('✅ Database OK');
+    } catch {
+      await ctx.reply('❌ Database error');
     }
   });
 
