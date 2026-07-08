@@ -7,6 +7,9 @@ export interface BookResult {
   fileSize?: number;
   language?: string;
   coverUrl?: string;
+  description?: string;
+  year?: number;
+  formats?: Record<string, string>;
 }
 
 export interface Source {

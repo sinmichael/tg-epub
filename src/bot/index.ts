@@ -157,20 +157,38 @@ export function createBot(): Telegraf {
 
   // ── Search ──
   bot.command('search', async (ctx) => {
-    const query = ctx.message.text.slice('/search'.length).trim();
+    const raw = ctx.message.text.slice('/search'.length).trim();
+    if (!raw) {
+      return ctx.reply('Please provide a search query. Example: /search moby dick');
+    }
+
+    // Parse --source and --format flags
+    let sourceFilter: string | undefined;
+    let query = raw;
+    const sourceMatch = query.match(/--source\s+(\S+)/i);
+    if (sourceMatch) {
+      sourceFilter = sourceMatch[1].toLowerCase();
+      query = query.replace(sourceMatch[0], '').trim();
+    }
+    const formatMatch = query.match(/--format\s+(\S+)/i);
+    if (formatMatch) {
+      query = query.replace(formatMatch[0], '').trim();
+    }
+
     if (!query) {
       return ctx.reply('Please provide a search query. Example: /search moby dick');
     }
 
-    logger.info({ userId: ctx.from?.id, query }, 'Command: search');
+    logger.info({ userId: ctx.from?.id, query, sourceFilter }, 'Command: search');
 
     ctx.sendChatAction('typing');
     const msg = await ctx.reply(`<i>Searching for "${escapeHtml(query)}"...</i>`, { parse_mode: 'HTML' });
     const prefs = ctx.from ? getPrefs(ctx.from.id) : { sources: null, language: '', format: 'epub' };
 
     try {
+      const sources = sourceFilter ? [sourceFilter] : (prefs.sources ?? undefined);
       const results = await withTimeout(
-        searchAll(query, 8, prefs.sources ?? undefined),
+        searchAll(query, 8, sources),
         45_000,
         'Search timed out',
       );
@@ -257,6 +275,29 @@ export function createBot(): Telegraf {
     }
   });
 
+  // ── Format ──
+  bot.command('format', async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const arg = ctx.message.text.slice('/format'.length).trim().toLowerCase();
+    const validFormats = ['epub', 'mobi', 'pdf', 'txt', 'html'];
+
+    if (!arg) {
+      const prefs = getPrefs(userId);
+      return ctx.reply(
+        `Current format: ${prefs.format}\nAvailable: ${validFormats.join(', ')}\nUsage: /format epub`,
+      );
+    }
+
+    if (!validFormats.includes(arg)) {
+      return ctx.reply(`Invalid format. Available: ${validFormats.join(', ')}`);
+    }
+
+    setPrefs(userId, { format: arg });
+    return ctx.reply(`Format preference set to: ${arg}`);
+  });
+
   // ── Language ──
   bot.command('language', async (ctx) => {
     const userId = ctx.from?.id;
@@ -324,6 +365,15 @@ export function createBot(): Telegraf {
     if (!book) {
       logger.warn({ userId: ctx.from?.id, sourceName, bookId }, 'Download: session expired');
       return ctx.editMessageText('Session expired. Please search again.');
+    }
+
+    // Respect user's format preference
+    if (ctx.from && book.formats) {
+      const prefs = getPrefs(ctx.from.id);
+      const preferred = book.formats[prefs.format];
+      if (preferred) {
+        book.downloadUrl = preferred;
+      }
     }
 
     const source = getSource(sourceName);

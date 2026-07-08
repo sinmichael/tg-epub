@@ -1,7 +1,31 @@
+import axios from 'axios';
 import { logger } from '../logger.js';
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+export async function downloadFile(
+  source: string,
+  url: string,
+  options?: { timeout?: number; headers?: Record<string, string> },
+): Promise<Buffer> {
+  logger.debug({ source, url }, 'Download starting');
+
+  const { data, status } = await axios.get(url, {
+    responseType: 'arraybuffer',
+    timeout: options?.timeout ?? 30_000,
+    headers: options?.headers,
+    validateStatus: (s) => s < 500,
+  });
+
+  if (status !== 200) {
+    throw new Error(`${source} download returned status ${status}`);
+  }
+
+  const buffer = Buffer.from(data);
+  logger.debug({ source, size: buffer.length }, 'Download complete');
+  return buffer;
 }
 
 export type AttemptOutcome<T> =

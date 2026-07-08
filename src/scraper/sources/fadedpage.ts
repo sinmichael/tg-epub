@@ -2,6 +2,7 @@ import * as cheerio from 'cheerio';
 import axios from 'axios';
 import type { BookResult, Source } from '../types.js';
 import { logger } from '../../logger.js';
+import { downloadFile } from '../utils.js';
 
 const BASE = 'https://www.fadedpage.com';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -88,21 +89,6 @@ export class FadedpageSource implements Source {
   }
 
   async download(book: BookResult): Promise<Buffer> {
-    logger.debug({ source: this.name, bookId: book.id, url: book.downloadUrl }, 'Download starting');
-
-    const { data, status } = await axios.get(book.downloadUrl, {
-      responseType: 'arraybuffer',
-      timeout: 30_000,
-      headers: { 'User-Agent': UA },
-      validateStatus: (s) => s < 500,
-    });
-
-    if (status !== 200) {
-      throw new Error(`Fadedpage download returned status ${status}`);
-    }
-
-    const buffer = Buffer.from(data);
-    logger.debug({ source: this.name, bookId: book.id, size: buffer.length }, 'Download complete');
-    return buffer;
+    return downloadFile(this.name, book.downloadUrl, { headers: { 'User-Agent': UA } });
   }
 }

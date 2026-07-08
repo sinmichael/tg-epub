@@ -28,6 +28,41 @@ const sources: Source[] = [
 
 const sourceMap = new Map<string, Source>(sources.map((s) => [s.name, s]));
 
+// ── Circuit-breaker ──
+interface SourceHealth {
+  failCount: number;
+  cooldownUntil: number;
+}
+
+const healthMap = new Map<string, SourceHealth>();
+
+const COOLDOWN_MS = 5 * 60 * 1000;
+const FAIL_THRESHOLD = 3;
+
+function isSourceHealthy(name: string): boolean {
+  const h = healthMap.get(name);
+  if (!h) return true;
+  if (h.cooldownUntil > Date.now()) {
+    logger.debug({ source: name, remaining: h.cooldownUntil - Date.now() }, 'Source in cooldown, skipping');
+    return false;
+  }
+  return true;
+}
+
+function recordSourceSuccess(name: string): void {
+  healthMap.delete(name);
+}
+
+function recordSourceFailure(name: string): void {
+  const h = healthMap.get(name) ?? { failCount: 0, cooldownUntil: 0 };
+  h.failCount++;
+  if (h.failCount >= FAIL_THRESHOLD) {
+    h.cooldownUntil = Date.now() + COOLDOWN_MS;
+    logger.warn({ source: name, cooldownMs: COOLDOWN_MS }, 'Source circuit opened (cooldown)');
+  }
+  healthMap.set(name, h);
+}
+
 export function getSources(): Source[] {
   return sources;
 }
@@ -99,9 +134,10 @@ export async function searchAll(
   const cached = getCachedSearch(query);
   if (cached) return cached;
 
-  const active = sourceNames
+  const active = (sourceNames
     ? sourceNames.map((n) => sourceMap.get(n)).filter(Boolean) as Source[]
-    : sources;
+    : sources)
+    .filter((s) => isSourceHealthy(s.name));
 
   const settled = await Promise.allSettled(
     active.map((s) => s.search(query, limitPerSource)),
@@ -112,9 +148,11 @@ export async function searchAll(
     const result = settled[i];
     const name = active[i].name;
     if (result.status === 'fulfilled') {
+      recordSourceSuccess(name);
       books.push(...result.value);
       logger.debug({ source: name, count: result.value.length }, 'Source search succeeded');
     } else {
+      recordSourceFailure(name);
       logger.warn({ source: name, err: result.reason }, 'Source search failed');
     }
   }

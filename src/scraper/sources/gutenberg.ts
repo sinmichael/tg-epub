@@ -1,6 +1,7 @@
 import axios from 'axios';
 import type { BookResult, Source } from '../types.js';
 import { logger } from '../../logger.js';
+import { downloadFile } from '../utils.js';
 
 const API_BASE = 'https://gutendex.com';
 
@@ -11,6 +12,8 @@ interface GutendexBook {
   formats: Record<string, string>;
   languages: string[];
   download_count: number;
+  subjects?: string[];
+  bookshelves?: string[];
 }
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
@@ -38,6 +41,21 @@ export class GutenbergSource implements Source {
         || book.formats['application/octet-stream']
         || '';
 
+      const description = book.subjects?.slice(0, 3).join(', ') || book.bookshelves?.slice(0, 2).join(', ');
+      const year = book.authors[0]?.birth_year ?? undefined;
+
+      const formats: Record<string, string> = {};
+      const formatMap: Record<string, string> = {
+        'application/epub+zip': 'epub',
+        'application/x-mobipocket-ebook': 'mobi',
+        'application/pdf': 'pdf',
+        'text/plain': 'txt',
+        'text/html': 'html',
+      };
+      for (const [mime, ext] of Object.entries(formatMap)) {
+        if (book.formats[mime]) formats[ext] = book.formats[mime];
+      }
+
       return {
         id: String(book.id),
         title: book.title,
@@ -46,6 +64,10 @@ export class GutenbergSource implements Source {
         downloadUrl: epubUrl,
         language: book.languages[0],
         fileSize: undefined,
+        formats: Object.keys(formats).length > 0 ? formats : undefined,
+        coverUrl: book.formats['image/jpeg'],
+        description: description || undefined,
+        year: year ? Number(year) : undefined,
       };
     }).filter((b) => b.downloadUrl);
 
@@ -54,21 +76,6 @@ export class GutenbergSource implements Source {
   }
 
   async download(book: BookResult): Promise<Buffer> {
-    logger.debug({ source: this.name, bookId: book.id, url: book.downloadUrl }, 'Download starting');
-
-    const { data, status } = await axios.get(book.downloadUrl, {
-      responseType: 'arraybuffer',
-      timeout: 30_000,
-      headers: { 'User-Agent': UA },
-      validateStatus: (s) => s < 500,
-    });
-
-    if (status !== 200) {
-      throw new Error(`Gutenberg download returned status ${status}`);
-    }
-
-    const buffer = Buffer.from(data);
-    logger.debug({ source: this.name, bookId: book.id, size: buffer.length }, 'Download complete');
-    return buffer;
+    return downloadFile(this.name, book.downloadUrl, { headers: { 'User-Agent': UA } });
   }
 }
