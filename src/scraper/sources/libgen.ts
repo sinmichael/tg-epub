@@ -3,14 +3,28 @@ import * as cheerio from 'cheerio';
 import type { BookResult, Source } from '../types.js';
 import { logger } from '../../logger.js';
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+const UAS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15',
+];
 
 const MIRRORS = [
   'https://libgen.li',
+  'https://libgen.bz',
+  'https://libgen.gl',
   'https://libgen.is',
   'https://libgen.rs',
   'https://libgen.st',
 ];
+
+function randomUA(): string {
+  return UAS[Math.floor(Math.random() * UAS.length)];
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 function parseSize(text: string): number | undefined {
   const match = text.trim().match(/^([\d.]+)\s*(?:MB|MiB)$/i);
@@ -73,15 +87,14 @@ async function trySearch(
   baseUrl: string,
   query: string,
   limit: number,
-  signal?: AbortSignal,
 ): Promise<BookResult[] | null> {
+  const ua = randomUA();
   try {
     const { data: html, status } = await axios.get(`${baseUrl}/index.php`, {
       params: { req: query, res: Math.min(limit, 25), page: 1, sort: 'def', sortmode: 'ASC' },
-      timeout: 15_000,
-      headers: { 'User-Agent': UA },
+      timeout: 20_000,
+      headers: { 'User-Agent': ua, Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
       validateStatus: (s) => s < 500,
-      signal,
     });
 
     if (status !== 200) {
@@ -90,11 +103,10 @@ async function trySearch(
     }
 
     const results = parseSearchPage(html, limit);
-    logger.debug({ mirror: baseUrl, query, dataRows: cheerio.load(html)('table.table-striped tr').filter((_, el) => cheerio.load(html)(el).find('td').length === 9).length, epubCount: results.length }, 'LibGen mirror search done');
     return results;
   } catch (err: any) {
     if (err.name === 'CanceledError') return null;
-    logger.warn({ mirror: baseUrl, err: err.message, query }, 'LibGen mirror search failed');
+    logger.warn({ mirror: baseUrl, err: err.message?.slice(0, 80), query }, 'LibGen mirror search failed');
     return null;
   }
 }
@@ -102,16 +114,15 @@ async function trySearch(
 async function tryDownload(
   baseUrl: string,
   md5: string,
-  signal?: AbortSignal,
 ): Promise<Buffer | null> {
+  const ua = randomUA();
   try {
     const downloadUrl = `${baseUrl}/get.php?md5=${md5}`;
 
     const { data: html, status: s1 } = await axios.get(downloadUrl, {
-      timeout: 15_000,
-      headers: { 'User-Agent': UA, Referer: `${baseUrl}/` },
+      timeout: 20_000,
+      headers: { 'User-Agent': ua, Referer: `${baseUrl}/` },
       validateStatus: (s) => s < 500,
-      signal,
     });
 
     if (s1 !== 200) {
@@ -134,9 +145,8 @@ async function tryDownload(
     const { data, status: s2 } = await axios.get(fullUrl, {
       responseType: 'arraybuffer',
       timeout: 120_000,
-      headers: { 'User-Agent': UA, Referer: downloadUrl },
+      headers: { 'User-Agent': ua, Referer: downloadUrl },
       validateStatus: (s) => s < 500,
-      signal,
     });
 
     if (s2 !== 200) {
@@ -147,7 +157,7 @@ async function tryDownload(
     return Buffer.from(data);
   } catch (err: any) {
     if (err.name === 'CanceledError') return null;
-    logger.warn({ mirror: baseUrl, err: err.message, md5 }, 'LibGen mirror download failed');
+    logger.warn({ mirror: baseUrl, err: err.message?.slice(0, 80), md5 }, 'LibGen mirror download failed');
     return null;
   }
 }
@@ -161,9 +171,22 @@ export class LibgenSource implements Source {
     for (const mirror of MIRRORS) {
       const results = await trySearch(mirror, query, limit);
       if (results && results.length > 0) {
-        logger.info({ mirror, query, count: results.length }, 'LibGen search succeeded on mirror');
+        logger.info({ mirror, query, count: results.length }, 'LibGen search succeeded');
         return results;
       }
+      await sleep(1000);
+    }
+
+    logger.info({ query }, 'First pass failed, retrying all mirrors with delay');
+    await sleep(3000);
+
+    for (const mirror of MIRRORS) {
+      const results = await trySearch(mirror, query, limit);
+      if (results && results.length > 0) {
+        logger.info({ mirror, query, count: results.length }, 'LibGen search succeeded on retry');
+        return results;
+      }
+      await sleep(1000);
     }
 
     logger.warn({ query }, 'All LibGen mirrors failed for search');
@@ -177,9 +200,22 @@ export class LibgenSource implements Source {
     for (const mirror of MIRRORS) {
       const buf = await tryDownload(mirror, md5);
       if (buf) {
-        logger.info({ mirror, bookId: md5, size: buf.length }, 'LibGen download succeeded on mirror');
+        logger.info({ mirror, bookId: md5, size: buf.length }, 'LibGen download succeeded');
         return buf;
       }
+      await sleep(1000);
+    }
+
+    logger.info({ bookId: md5 }, 'First pass failed, retrying all mirrors');
+    await sleep(3000);
+
+    for (const mirror of MIRRORS) {
+      const buf = await tryDownload(mirror, md5);
+      if (buf) {
+        logger.info({ mirror, bookId: md5, size: buf.length }, 'LibGen download succeeded on retry');
+        return buf;
+      }
+      await sleep(1000);
     }
 
     throw new Error('All LibGen mirrors failed for download');
