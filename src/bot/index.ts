@@ -6,7 +6,7 @@ import { enqueue } from '../queue.js';
 import pLimit from 'p-limit';
 import { createTempDir, cleanupTempDir, writeTempFile, isFileTooLarge } from '../storage.js';
 import { getCachedDownload, setCachedDownload, purgeSearchCache, purgeFileCache } from '../cache.js';
-import { searchResultsKeyboard, formatResultsList } from './keyboards.js';
+import { searchResultsKeyboard, formatResultsList, escapeHtml } from './keyboards.js';
 import { cooldownMiddleware, errorHandler } from './middleware.js';
 import { logger } from '../logger.js';
 import db from '../db.js';
@@ -164,7 +164,8 @@ export function createBot(): Telegraf {
 
     logger.info({ userId: ctx.from?.id, query }, 'Command: search');
 
-    const msg = await ctx.reply('Searching...');
+    ctx.sendChatAction('typing');
+    const msg = await ctx.reply(`<i>Searching for "${escapeHtml(query)}"...</i>`, { parse_mode: 'HTML' });
     const prefs = ctx.from ? getPrefs(ctx.from.id) : { sources: null, language: '', format: 'epub' };
 
     try {
@@ -360,7 +361,7 @@ export function createBot(): Telegraf {
           { source: filePath, filename: fileName },
           { caption: `${book.title}\n${book.author} [cached]` },
         );
-        await ctx.deleteMessage().catch(() => {});
+        await ctx.editMessageText(`✅ Downloaded: ${book.title}`).catch(() => {});
       } finally {
         cleanupTempDir(tmpDir);
       }
@@ -373,6 +374,7 @@ export function createBot(): Telegraf {
       ? ` (${(book.fileSize / 1e6).toFixed(1)} MB)`
       : '';
 
+    ctx.sendChatAction('upload_document');
     await ctx.editMessageText(`Downloading${sizeHint}... please wait.`);
 
     try {
@@ -399,7 +401,7 @@ export function createBot(): Telegraf {
             { caption: `${book.title}\n${book.author}` },
           );
 
-          await ctx.deleteMessage().catch(() => {});
+          await ctx.editMessageText(`✅ Downloaded: ${book.title}`).catch(() => {});
         } finally {
           cleanupTempDir(tmpDir);
         }

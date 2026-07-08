@@ -2,17 +2,26 @@ import type { BookResult, Source } from './types.js';
 import { GutenbergSource } from './sources/gutenberg.js';
 import { LibgenSource } from './sources/libgen.js';
 import { AnnaArchiveSource } from './sources/anna.js';
+import { StandardEbooksSource } from './sources/standard.js';
+import { FadedpageSource } from './sources/fadedpage.js';
+import { PlanetEbookSource } from './sources/planetebook.js';
 import { getCachedSearch, setCachedSearch } from '../cache.js';
 import { logger } from '../logger.js';
 
 const sourcePriority = new Map<string, number>([
   ['libgen', 3],
   ['anna', 2],
+  ['standard', 2],
   ['gutenberg', 1],
+  ['fadedpage', 1],
+  ['planetebook', 1],
 ]);
 
 const sources: Source[] = [
   new GutenbergSource(),
+  new StandardEbooksSource(),
+  new FadedpageSource(),
+  new PlanetEbookSource(),
   new AnnaArchiveSource(),
   new LibgenSource(),
 ];
