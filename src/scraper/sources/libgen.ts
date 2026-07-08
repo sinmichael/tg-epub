@@ -83,11 +83,15 @@ function parseSearchPage(html: string, limit: number): BookResult[] {
   return results.slice(0, limit);
 }
 
+type SearchOutcome =
+  | { ok: true; results: BookResult[] }
+  | { ok: false; is503: boolean };
+
 async function trySearch(
   baseUrl: string,
   query: string,
   limit: number,
-): Promise<BookResult[] | null> {
+): Promise<SearchOutcome> {
   const ua = randomUA();
   try {
     const { data: html, status } = await axios.get(`${baseUrl}/index.php`, {
@@ -99,15 +103,16 @@ async function trySearch(
 
     if (status !== 200) {
       logger.warn({ mirror: baseUrl, status, query }, 'LibGen mirror returned non-200');
-      return null;
+      return { ok: false, is503: status === 503 };
     }
 
     const results = parseSearchPage(html, limit);
-    return results;
+    return { ok: true, results };
   } catch (err: any) {
-    if (err.name === 'CanceledError') return null;
-    logger.warn({ mirror: baseUrl, err: err.message?.slice(0, 80), query }, 'LibGen mirror search failed');
-    return null;
+    if (err.name === 'CanceledError') return { ok: false, is503: false };
+    const is503 = err.message?.includes('503');
+    logger.warn({ mirror: baseUrl, err: err.message?.slice(0, 80), query, is503 }, 'LibGen mirror search failed');
+    return { ok: false, is503: !!is503 };
   }
 }
 
@@ -157,7 +162,8 @@ async function tryDownload(
     return Buffer.from(data);
   } catch (err: any) {
     if (err.name === 'CanceledError') return null;
-    logger.warn({ mirror: baseUrl, err: err.message?.slice(0, 80), md5 }, 'LibGen mirror download failed');
+    const is503 = err.message?.includes('503');
+    logger.warn({ mirror: baseUrl, err: err.message?.slice(0, 80), md5, is503 }, 'LibGen mirror download failed');
     return null;
   }
 }
@@ -168,55 +174,86 @@ export class LibgenSource implements Source {
   async search(query: string, limit = 10): Promise<BookResult[]> {
     logger.debug({ source: this.name, query, limit }, 'Source search');
 
-    for (const mirror of MIRRORS) {
-      const results = await trySearch(mirror, query, limit);
-      if (results && results.length > 0) {
-        logger.info({ mirror, query, count: results.length }, 'LibGen search succeeded');
-        return results;
-      }
-      await sleep(1000);
-    }
+    const runPass = async (pass: number): Promise<BookResult[] | 'geo-blocked' | 'exhausted'> => {
+      let consecutive503 = 0;
 
-    logger.info({ query }, 'First pass failed, retrying all mirrors with delay');
+      for (const mirror of MIRRORS) {
+        const outcome = await trySearch(mirror, query, limit);
+
+        if (outcome.ok) {
+          logger.info({ mirror, query, count: outcome.results.length, pass }, 'LibGen search succeeded');
+          return outcome.results;
+        }
+
+        if (outcome.is503) {
+          consecutive503++;
+          logger.debug({ mirror, consecutive503, pass }, 'LibGen 503, tracking for geo-block detection');
+          if (consecutive503 >= 3) {
+            logger.warn({ query, pass }, 'LibGen: 3 consecutive 503s, likely geo-blocked');
+            return 'geo-blocked';
+          }
+        } else {
+          consecutive503 = 0;
+        }
+
+        await sleep(1000);
+      }
+
+      return 'exhausted';
+    };
+
+    const first = await runPass(1);
+    if (first === 'geo-blocked') {
+      logger.warn({ query }, 'LibGen appears geo-blocked, skipping retry');
+      return [];
+    }
+    if (first !== 'exhausted') return first;
+
+    logger.info({ query }, 'LibGen first pass exhausted, retrying with delay');
     await sleep(3000);
 
-    for (const mirror of MIRRORS) {
-      const results = await trySearch(mirror, query, limit);
-      if (results && results.length > 0) {
-        logger.info({ mirror, query, count: results.length }, 'LibGen search succeeded on retry');
-        return results;
-      }
-      await sleep(1000);
+    const second = await runPass(2);
+    if (second === 'geo-blocked' || second === 'exhausted') {
+      logger.warn({ query }, 'All LibGen mirrors failed');
+      return [];
     }
-
-    logger.warn({ query }, 'All LibGen mirrors failed for search');
-    return [];
+    return second;
   }
 
   async download(book: BookResult): Promise<Buffer> {
     const md5 = book.id;
     logger.debug({ source: this.name, bookId: md5 }, 'Download starting');
 
-    for (const mirror of MIRRORS) {
-      const buf = await tryDownload(mirror, md5);
-      if (buf) {
-        logger.info({ mirror, bookId: md5, size: buf.length }, 'LibGen download succeeded');
-        return buf;
-      }
-      await sleep(1000);
-    }
+    const runPass = async (pass: number): Promise<Buffer | 'geo-blocked' | 'exhausted'> => {
+      let consecutive503 = 0;
 
-    logger.info({ bookId: md5 }, 'First pass failed, retrying all mirrors');
+      for (const mirror of MIRRORS) {
+        const buf = await tryDownload(mirror, md5);
+        if (buf) {
+          logger.info({ mirror, bookId: md5, size: buf.length, pass }, 'LibGen download succeeded');
+          return buf;
+        }
+
+        consecutive503++;
+        if (consecutive503 >= 3) {
+          logger.warn({ bookId: md5, pass }, 'LibGen download: 3 consecutive failures, likely geo-blocked');
+          return 'geo-blocked';
+        }
+
+        await sleep(1000);
+      }
+
+      return 'exhausted';
+    };
+
+    const first = await runPass(1);
+    if (first instanceof Buffer) return first;
+
+    logger.info({ bookId: md5 }, 'LibGen download first pass failed, retrying');
     await sleep(3000);
 
-    for (const mirror of MIRRORS) {
-      const buf = await tryDownload(mirror, md5);
-      if (buf) {
-        logger.info({ mirror, bookId: md5, size: buf.length }, 'LibGen download succeeded on retry');
-        return buf;
-      }
-      await sleep(1000);
-    }
+    const second = await runPass(2);
+    if (second instanceof Buffer) return second;
 
     throw new Error('All LibGen mirrors failed for download');
   }

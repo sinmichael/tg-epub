@@ -130,7 +130,12 @@ export function createBot(): Telegraf {
     const prefs = ctx.from ? getPrefs(ctx.from.id) : { sources: null, language: '', format: 'epub' };
 
     try {
-      const results = await searchAll(query, 8, prefs.sources ?? undefined);
+      const results = await Promise.race([
+        searchAll(query, 8, prefs.sources ?? undefined),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Search timed out')), 45_000),
+        ),
+      ]);
 
       if (results.length === 0) {
         return ctx.telegram.editMessageText(
