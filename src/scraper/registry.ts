@@ -6,9 +6,9 @@ import { getCachedSearch, setCachedSearch } from '../cache.js';
 import { logger } from '../logger.js';
 
 const sourcePriority = new Map<string, number>([
-  ['gutenberg', 3],
+  ['libgen', 3],
   ['anna', 2],
-  ['libgen', 1],
+  ['gutenberg', 1],
 ]);
 
 const sources: Source[] = [
