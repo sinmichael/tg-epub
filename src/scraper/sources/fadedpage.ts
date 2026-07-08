@@ -92,7 +92,7 @@ export class FadedpageSource implements Source {
 
     const { data, status } = await axios.get(book.downloadUrl, {
       responseType: 'arraybuffer',
-      timeout: 60_000,
+      timeout: 30_000,
       headers: { 'User-Agent': UA },
       validateStatus: (s) => s < 500,
     });

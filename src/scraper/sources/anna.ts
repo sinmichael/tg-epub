@@ -107,7 +107,7 @@ async function trySlowDownload(
     try {
       const { data, status } = await httpClient.get(`${baseUrl}/slow_download/${md5}/0/${i}`, {
         responseType: 'arraybuffer',
-        timeout: 60_000,
+        timeout: 30_000,
         headers: { 'User-Agent': ua, Referer: `${baseUrl}/` },
         validateStatus: (s) => s < 500,
       });

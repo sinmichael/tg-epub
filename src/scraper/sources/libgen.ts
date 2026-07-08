@@ -143,7 +143,7 @@ async function tryDownload(
 
     const { data, status: s2 } = await httpClient.get(fullUrl, {
       responseType: 'arraybuffer',
-      timeout: 120_000,
+      timeout: 60_000,
       headers: { 'User-Agent': ua, Referer: downloadUrl },
       validateStatus: (s) => s < 500,
     });
